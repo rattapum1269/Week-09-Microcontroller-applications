@@ -716,14 +716,304 @@ I (3340) LED_CONTROL: LED OFF
 
 // TODO: แก้ไข led_init() และ led_blink_task()
 ```
+```c
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+
+#define LED1_GPIO   GPIO_NUM_2
+#define LED2_GPIO   GPIO_NUM_4
+#define LED3_GPIO   GPIO_NUM_5
+
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_TIMER      LEDC_TIMER_0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT      // 0..8191
+#define LEDC_FREQUENCY  5000                    // 5 kHz
+#define FADE_TIME_MS    3000
+
+static const char *TAG = "PWM_3LED";
+
+static void ledc_init(void)
+{
+    // 1) ตั้งค่า Timer
+    ledc_timer_config_t tcfg = {
+        .speed_mode       = LEDC_MODE,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .timer_num        = LEDC_TIMER,
+        .freq_hz          = LEDC_FREQUENCY,
+        .clk_cfg          = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    // 2) ตั้งค่า Channel สำหรับ LED 3 ดวง
+    ledc_channel_config_t ch_cfg[] = {
+        { .channel = LEDC_CHANNEL_0, .gpio_num = LED1_GPIO, .speed_mode = LEDC_MODE,
+          .duty = 0, .hpoint = 0, .timer_sel = LEDC_TIMER },
+        { .channel = LEDC_CHANNEL_1, .gpio_num = LED2_GPIO, .speed_mode = LEDC_MODE,
+          .duty = 0, .hpoint = 0, .timer_sel = LEDC_TIMER },
+        { .channel = LEDC_CHANNEL_2, .gpio_num = LED3_GPIO, .speed_mode = LEDC_MODE,
+          .duty = 0, .hpoint = 0, .timer_sel = LEDC_TIMER },
+    };
+    for (size_t i = 0; i < sizeof(ch_cfg)/sizeof(ch_cfg[0]); ++i) {
+        ESP_ERROR_CHECK(ledc_channel_config(&ch_cfg[i]));
+    }
+
+    // 3) เปิดใช้ fade service (จำเป็นสำหรับ ledc_set_fade_with_time)
+    ESP_ERROR_CHECK(ledc_fade_func_install(0));
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "Start 3-LED breathing");
+    ledc_init();
+
+    while (1) {
+        // Fade IN: 0 -> 8191
+        for (ledc_channel_t ch = LEDC_CHANNEL_0; ch <= LEDC_CHANNEL_2; ch++) {
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(LEDC_MODE, ch, 8191, FADE_TIME_MS));
+            ESP_ERROR_CHECK(ledc_fade_start(LEDC_MODE, ch, LEDC_FADE_NO_WAIT));
+        }
+        vTaskDelay(pdMS_TO_TICKS(FADE_TIME_MS + 20));  // กันเวลาไม่พอเล็กน้อย
+
+        // Fade OUT: 8191 -> 0
+        for (ledc_channel_t ch = LEDC_CHANNEL_0; ch <= LEDC_CHANNEL_2; ch++) {
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(LEDC_MODE, ch, 0, FADE_TIME_MS));
+            ESP_ERROR_CHECK(ledc_fade_start(LEDC_MODE, ch, LEDC_FADE_NO_WAIT));
+        }
+        vTaskDelay(pdMS_TO_TICKS(FADE_TIME_MS + 20));
+    }
+}
+```
+
+
+https://github.com/user-attachments/assets/eeb009d5-1de1-4647-8e69-b052d601ca1b
+
 
 ### 🔧 Exercise 2: LED Patterns
 
 สร้างรูปแบบการกระพริบ:
 
 - **Knight Rider (วิ่งไปมา)** - LED เคลื่อนที่ไปมา
+ ```c
+   #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_TIMER      LEDC_TIMER_0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT
+#define LEDC_FREQUENCY  5000
+#define MAX_DUTY        ((1 << 13) - 1)
+
+#define LED_COUNT 3
+static const int LED_GPIO[LED_COUNT] = {
+    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5
+};
+
+#define STEP_DELAY_MS 150   // ความเร็วการวิ่ง
+
+static const char *TAG = "KITT_BLINK";
+
+static void ledc_init(void)
+{
+    // Timer
+    ledc_timer_config_t tcfg = {
+        .speed_mode       = LEDC_MODE,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .timer_num        = LEDC_TIMER,
+        .freq_hz          = LEDC_FREQUENCY,
+        .clk_cfg          = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    // Channels สำหรับ LED แต่ละดวง
+    for (int i = 0; i < LED_COUNT; i++) {
+        ledc_channel_config_t ccfg = {
+            .channel    = (ledc_channel_t)i,
+            .gpio_num   = LED_GPIO[i],
+            .speed_mode = LEDC_MODE,
+            .duty       = 0,
+            .hpoint     = 0,
+            .timer_sel  = LEDC_TIMER,
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
+    }
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "Start Knight Rider Blink (no fade)");
+    ledc_init();
+
+    int pos = 0;   // ตำแหน่ง LED ที่ติด
+    int dir = 1;   // +1 = ไปขวา, -1 = ไปซ้าย
+
+    while (1) {
+        // ปิด LED ทุกดวงก่อน
+        for (int i = 0; i < LED_COUNT; i++) {
+            ledc_set_duty(LEDC_MODE, i, 0);
+            ledc_update_duty(LEDC_MODE, i);
+        }
+
+        // เปิด LED ดวงปัจจุบัน
+        ledc_set_duty(LEDC_MODE, pos, MAX_DUTY);
+        ledc_update_duty(LEDC_MODE, pos);
+
+        vTaskDelay(pdMS_TO_TICKS(STEP_DELAY_MS));
+
+        // เปลี่ยนทิศทางเมื่อถึงขอบ
+        if (pos == LED_COUNT - 1) dir = -1;
+        else if (pos == 0)        dir = 1;
+
+        pos += dir;
+    }
+}
+
+```
+
+
+https://github.com/user-attachments/assets/0ec3b375-1c45-4deb-b8aa-332b218a81b0
+
+
 - **Binary Counter (นับเลขฐาน 2)** - แสดงเลขฐาน 2
+ ```c
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_TIMER      LEDC_TIMER_0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT
+#define LEDC_FREQ_HZ    5000
+#define MAX_DUTY        ((1 << 13) - 1)
+
+#define LED_COUNT 3
+static const int LED_GPIO[LED_COUNT] = {
+    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5
+};
+
+#define STEP_DELAY_MS   800   // ความเร็วการนับ
+
+static const char *TAG = "BIN_BLINK";
+
+static void ledc_init(void) {
+    ledc_timer_config_t tcfg = {
+        .speed_mode       = LEDC_MODE,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .timer_num        = LEDC_TIMER,
+        .freq_hz          = LEDC_FREQ_HZ,
+        .clk_cfg          = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    for (int i = 0; i < LED_COUNT; i++) {
+        ledc_channel_config_t ccfg = {
+            .channel    = (ledc_channel_t)i,
+            .gpio_num   = LED_GPIO[i],
+            .speed_mode = LEDC_MODE,
+            .duty       = 0,
+            .hpoint     = 0,
+            .timer_sel  = LEDC_TIMER,
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
+    }
+}
+
+void app_main(void) {
+    ESP_LOGI(TAG, "Binary Counter (Blink)");
+    ledc_init();
+
+    int count = 0;
+    while (1) {
+        for (int i = 0; i < LED_COUNT; i++) {
+            int bit = (count >> i) & 0x01;
+            int duty = bit ? MAX_DUTY : 0;
+
+            ledc_set_duty(LEDC_MODE, (ledc_channel_t)i, duty);
+            ledc_update_duty(LEDC_MODE, (ledc_channel_t)i);
+        }
+        vTaskDelay(pdMS_TO_TICKS(STEP_DELAY_MS));
+
+        count = (count + 1) % (1 << LED_COUNT);  // นับเลขฐาน 2
+    }
+}
+
+```
+
+
+https://github.com/user-attachments/assets/549e17c2-d61b-4a99-abcd-b5703ef447e6
+
+
 - **Random Blinking** - กระพริบแบบสุ่ม
+```c
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+#include "esp_random.h"
+
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_TIMER      LEDC_TIMER_0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT
+#define LEDC_FREQ_HZ    5000
+#define MAX_DUTY        ((1 << 13) - 1)
+
+#define LED_COUNT 3
+static const int LED_GPIO[LED_COUNT] = {
+    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5
+};
+
+#define STEP_DELAY_MS   500   // หน่วงเวลาหลังสุ่มรอบนึง
+
+static const char *TAG = "RAND_BLINK";
+
+static void ledc_init(void) {
+    ledc_timer_config_t tcfg = {
+        .speed_mode       = LEDC_MODE,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .timer_num        = LEDC_TIMER,
+        .freq_hz          = LEDC_FREQ_HZ,
+        .clk_cfg          = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    for (int i = 0; i < LED_COUNT; i++) {
+        ledc_channel_config_t ccfg = {
+            .channel    = (ledc_channel_t)i,
+            .gpio_num   = LED_GPIO[i],
+            .speed_mode = LEDC_MODE,
+            .duty       = 0,
+            .hpoint     = 0,
+            .timer_sel  = LEDC_TIMER,
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
+    }
+}
+
+void app_main(void) {
+    ESP_LOGI(TAG, "Random Blinking (Blink)");
+    ledc_init();
+
+    while (1) {
+        for (int i = 0; i < LED_COUNT; i++) {
+            int bit = esp_random() & 0x01; // สุ่ม 0 หรือ 1
+            int duty = bit ? MAX_DUTY : 0;
+
+            ledc_set_duty(LEDC_MODE, (ledc_channel_t)i, duty);
+            ledc_update_duty(LEDC_MODE, (ledc_channel_t)i);
+        }
+        vTaskDelay(pdMS_TO_TICKS(STEP_DELAY_MS));
+    }
+}
+
+```
+
+
+https://github.com/user-attachments/assets/3c414289-27d3-44e5-8de3-f6437d1fc6ec
+
 
 ---
 
@@ -732,8 +1022,259 @@ I (3340) LED_CONTROL: LED OFF
 สร้างรูปแบบการกระพริบเหมือน Exercise 2 แต่เป็นจังหวะการหายใจ
 
 - **Knight Rider (วิ่งไปมา)** - LED เคลื่อนที่ไปมา
+
+
+https://github.com/user-attachments/assets/b17c7f4b-e68c-48c4-a7c1-8039f6ad2a04
+
+  
+```c
+  #include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_TIMER      LEDC_TIMER_0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT          // 0..8191
+#define LEDC_FREQ_HZ    5000                        // 5 kHz
+#define MAX_DUTY        ((1 << 13) - 1)            // 8191
+
+// ปรับให้ตรงขาบอร์ดคุณ
+#define LED_COUNT 3
+static const int LED_GPIO[LED_COUNT] = {
+    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5
+};
+
+// เอฟเฟกต์
+#define STEP_TIME_MS    150    // ความเร็ววิ่งต่อ 1 ตำแหน่ง
+#define FADE_TIME_MS    140    // ความนุ่มของการเปลี่ยน (ต้อง <= STEP_TIME_MS)
+#define TRAIL_RATIO     25     // % ความสว่างของหลอดข้างเคียง (0–100)
+
+static const char *TAG = "KITT";
+
+static void ledc_init(void)
+{
+    // Timer
+    ledc_timer_config_t tcfg = {
+        .speed_mode      = LEDC_MODE,
+        .duty_resolution = LEDC_DUTY_RES,
+        .timer_num       = LEDC_TIMER,
+        .freq_hz         = LEDC_FREQ_HZ,
+        .clk_cfg         = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    // Channels
+    for (int i = 0; i < LED_COUNT; i++) {
+        ledc_channel_config_t ccfg = {
+            .channel    = (ledc_channel_t)i,
+            .gpio_num   = LED_GPIO[i],
+            .speed_mode = LEDC_MODE,
+            .duty       = 0,
+            .hpoint     = 0,
+            .timer_sel  = LEDC_TIMER,
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
+    }
+
+    // เปิด fade service
+    ESP_ERROR_CHECK(ledc_fade_func_install(0));
+}
+
+static inline uint32_t pct_to_duty(int pct) {
+    if (pct <= 0) return 0;
+    if (pct >= 100) return MAX_DUTY;
+    return (uint32_t)((MAX_DUTY * (uint64_t)pct) / 100);
+}
+
+void app_main(void)
+{
+    ESP_LOGI(TAG, "Start Knight Rider (3 LEDs)");
+    ledc_init();
+
+    const uint32_t duty_main  = MAX_DUTY;                 // ไฟหลัก 100%
+    const uint32_t duty_trail = pct_to_duty(TRAIL_RATIO); // ไฟตาม % ที่กำหนด
+
+    int pos = 0;          // ตำแหน่งไฟหลัก (0..LED_COUNT-1)
+    int dir = +1;         // ทิศทาง (+1 ไปขวา, -1 ไปซ้าย)
+
+    while (1) {
+        // ตั้งเป้าหมายความสว่างแต่ละดวง (main + trail)
+        for (int i = 0; i < LED_COUNT; i++) {
+            uint32_t target = 0;
+
+            if (i == pos) {
+                target = duty_main;
+            } else if (i == pos - 1 || i == pos + 1) {
+                target = duty_trail;
+            } else {
+                target = 0;
+            }
+
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(
+                LEDC_MODE, (ledc_channel_t)i, target, FADE_TIME_MS));
+            // ใช้ NO_WAIT เพื่อ crossfade พร้อมกัน
+            ESP_ERROR_CHECK(ledc_fade_start(
+                LEDC_MODE, (ledc_channel_t)i, LEDC_FADE_NO_WAIT));
+        }
+
+        // รอให้การเฟดรอบนี้เดินไปพอเหมาะ
+        vTaskDelay(pdMS_TO_TICKS(STEP_TIME_MS));
+
+        // กระดอนกลับเมื่อชนขอบ
+        if (pos == LED_COUNT - 1) dir = -1;
+        else if (pos == 0)        dir = +1;
+
+        pos += dir;
+    }
+}
+```
 - **Binary Counter (นับเลขฐาน 2)** - แสดงเลขฐาน 2
+  https://github.com/user-attachments/assets/f1428767-deeb-4edf-8ae6-080d96147de8
+ ```c
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_TIMER      LEDC_TIMER_0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT
+#define LEDC_FREQ_HZ    5000
+#define MAX_DUTY        ((1 << 13) - 1)
+
+#define LED_COUNT 3
+static const int LED_GPIO[LED_COUNT] = {
+    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5
+};
+
+#define STEP_DELAY_MS   800   // ความเร็วการนับ
+#define FADE_TIME_MS    600   // เวลาหายใจ
+
+static const char *TAG = "BIN_FADE";
+
+static void ledc_init(void) {
+    ledc_timer_config_t tcfg = {
+        .speed_mode       = LEDC_MODE,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .timer_num        = LEDC_TIMER,
+        .freq_hz          = LEDC_FREQ_HZ,
+        .clk_cfg          = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    for (int i = 0; i < LED_COUNT; i++) {
+        ledc_channel_config_t ccfg = {
+            .channel    = (ledc_channel_t)i,
+            .gpio_num   = LED_GPIO[i],
+            .speed_mode = LEDC_MODE,
+            .duty       = 0,
+            .hpoint     = 0,
+            .timer_sel  = LEDC_TIMER,
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
+    }
+
+    ESP_ERROR_CHECK(ledc_fade_func_install(0));
+}
+
+void app_main(void) {
+    ESP_LOGI(TAG, "Binary Counter (Fade)");
+    ledc_init();
+
+    int count = 0;
+    while (1) {
+        for (int i = 0; i < LED_COUNT; i++) {
+            int bit = (count >> i) & 0x01;
+            int target = bit ? MAX_DUTY : 0;
+
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(
+                LEDC_MODE, (ledc_channel_t)i, target, FADE_TIME_MS));
+            ESP_ERROR_CHECK(ledc_fade_start(
+                LEDC_MODE, (ledc_channel_t)i, LEDC_FADE_NO_WAIT));
+        }
+        vTaskDelay(pdMS_TO_TICKS(STEP_DELAY_MS));
+
+        count = (count + 1) % (1 << LED_COUNT);  // นับเลขฐาน 2
+    }
+}
+
+```
+
+
 - **Random Blinking** - กระพริบแบบสุ่ม
+
+ 
+
+https://github.com/user-attachments/assets/b392afc8-666a-4927-826b-f9bdfcc0b227
+
+ 
+```c
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "driver/ledc.h"
+#include "esp_log.h"
+#include "esp_random.h"
+
+#define LEDC_MODE       LEDC_LOW_SPEED_MODE
+#define LEDC_TIMER      LEDC_TIMER_0
+#define LEDC_DUTY_RES   LEDC_TIMER_13_BIT
+#define LEDC_FREQ_HZ    5000
+#define MAX_DUTY        ((1 << 13) - 1)
+
+#define LED_COUNT 3
+static const int LED_GPIO[LED_COUNT] = {
+    GPIO_NUM_2, GPIO_NUM_4, GPIO_NUM_5
+};
+
+#define STEP_DELAY_MS   500   // หน่วงเวลาหลังสุ่มรอบนึง
+#define FADE_TIME_MS    400   // เวลา fade
+
+static const char *TAG = "RAND_FADE";
+
+static void ledc_init(void) {
+    ledc_timer_config_t tcfg = {
+        .speed_mode       = LEDC_MODE,
+        .duty_resolution  = LEDC_DUTY_RES,
+        .timer_num        = LEDC_TIMER,
+        .freq_hz          = LEDC_FREQ_HZ,
+        .clk_cfg          = LEDC_AUTO_CLK,
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&tcfg));
+
+    for (int i = 0; i < LED_COUNT; i++) {
+        ledc_channel_config_t ccfg = {
+            .channel    = (ledc_channel_t)i,
+            .gpio_num   = LED_GPIO[i],
+            .speed_mode = LEDC_MODE,
+            .duty       = 0,
+            .hpoint     = 0,
+            .timer_sel  = LEDC_TIMER,
+        };
+        ESP_ERROR_CHECK(ledc_channel_config(&ccfg));
+    }
+
+    ESP_ERROR_CHECK(ledc_fade_func_install(0));
+}
+
+void app_main(void) {
+    ESP_LOGI(TAG, "Random Blinking (Fade)");
+    ledc_init();
+
+    while (1) {
+        for (int i = 0; i < LED_COUNT; i++) {
+            int bit = esp_random() & 0x01; // สุ่ม 0 หรือ 1
+            int target = bit ? MAX_DUTY : 0;
+
+            ESP_ERROR_CHECK(ledc_set_fade_with_time(
+                LEDC_MODE, (ledc_channel_t)i, target, FADE_TIME_MS));
+            ESP_ERROR_CHECK(ledc_fade_start(
+                LEDC_MODE, (ledc_channel_t)i, LEDC_FADE_NO_WAIT));
+        }
+        vTaskDelay(pdMS_TO_TICKS(STEP_DELAY_MS));
+    }
+}
+
 
 
 ## 📚 Additional Resources
@@ -754,7 +1295,7 @@ I (3340) LED_CONTROL: LED OFF
 - [ESP32-GPIO-Knowledge-Sheet.md](ESP32-GPIO-Knowledge-Sheet.md) - ทฤษฎีเชิงลึก
 - ESP32 GPIO Pinout และ Constraints
 - FreeRTOS Task Programming Guide
-
+```
 ---
 
 *📅 Created: September 2025*  
